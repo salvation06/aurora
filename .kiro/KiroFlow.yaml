@@ -1,0 +1,617 @@
+app: Aurora
+version: 1.0.0
+description: >
+  Aurora takes AI-generated songs (uploaded by the user), plus an artist
+  name, album name, and description, and uses a Kiro multi-agent system to
+  generate an AI artist persona, album identity, liner notes, cover art prompts
+  and images, a promo video storyboard, and a final content bundle ready for
+  ISO creation and NFT minting. Using the Inputs, also design the front end
+  web application that the user will upload to.
+
+# ---------------------------------------------------------------------------
+# Inputs: what the web app / user provides to the Kiro flow
+# ---------------------------------------------------------------------------
+inputs:
+  - name: artistName
+    type: string
+    description: "Name of the AI artist that will appear on the CD and assets."
+    required: true
+
+  - name: albumName
+    type: string
+    description: "Name of the album/CD."
+    required: true
+
+  - name: albumDescription
+    type: string
+    description: >
+      Text describing the album's vibe, themes, mood, or story
+      (e.g., 'nostalgic synthwave about driving in LA in 1995').
+    required: true
+
+  - name: uploadedTracks
+    type: TrackUpload[]
+    description: >
+      List of uploaded AI-generated songs/videos. Each item includes a file
+      reference and optional initial title.
+    required: true
+
+# ---------------------------------------------------------------------------
+# Core entities used throughout the flow
+# ---------------------------------------------------------------------------
+entities:
+  TrackUpload:
+    fields:
+      id: string           # client-generated upload id
+      filePath: string     # local or storage URL reference
+      originalFileName: string
+      userTitle: string?   # optional user-supplied track title
+
+  Track:
+    fields:
+      id: string
+      filePath: string     # local path used for bundling
+      title: string
+      durationSec: integer
+      mediaType: string    # "audio" | "video"
+      trackNo: integer
+
+  TrackList:
+    fields:
+      tracks: Track[]
+
+  ArtistProfile:
+    fields:
+      artistName: string
+      personaSummary: string
+      visualIdentityTags: string[]   # e.g. ["neon", "retro-futurism"]
+      tone: string                   # e.g. "moody, cinematic"
+      originStory: string
+
+  AlbumProfile:
+    fields:
+      albumName: string
+      albumConcept: string
+      themes: string[]
+      colorPalette: string[]         # hex or descriptive color words
+      coverArtDirection: string      # high-level direction text
+
+  LinerNotes:
+    fields:
+      intro: string
+      artistStory: string
+      albumStory: string
+      trackNotes: map<string, string>  # track title -> note
+      thankYous: string
+      credits: string
+
+  CoverArtDesign:
+    fields:
+      frontCoverPrompt: string
+      backCoverPrompt: string
+      artistPortraitPrompts: string[]
+      frontCoverUrl: string?          # populated if image tool is used
+      backCoverUrl: string?
+      portraitUrls: string[]?
+
+  PromoStoryboard:
+    fields:
+      lengthSec: integer
+      beats: PromoBeat[]
+
+  PromoBeat:
+    fields:
+      time: integer           # second mark in the video
+      visual: string          # description of the frame/scene
+      text: string            # on-screen text
+      audioNote: string       # e.g. "play 8s snippet from Track 1"
+
+  ContentFile:
+    fields:
+      path: string            # path on the CD's filesystem, e.g. "audio/01_Title.mp3"
+      sourcePath: string      # local or remote source file path/url
+
+  ContentBundle:
+    fields:
+      bundleId: string
+      files: ContentFile[]
+      volumeLabel: string
+
+  BurnResult:
+    fields:
+      isoPath: string
+      burnStatus: string        # "NOT_BURNED" | "SUCCESS" | "FAILED"
+      burnLog: string
+
+# ---------------------------------------------------------------------------
+# MCP tools Kiro agents can call
+# ---------------------------------------------------------------------------
+tools:
+  - name: media.inspect
+    description: >
+      Inspect audio/video file metadata (duration, sample rate, dimensions).
+    inputSchema:
+      type: object
+      properties:
+        filePath:
+          type: string
+    outputSchema:
+      type: object
+      properties:
+        durationSec:
+          type: integer
+        mediaType:
+          type: string  # "audio" | "video"
+
+  - name: art.generateImage
+    description: >
+      Generate an image from a text prompt.
+    inputSchema:
+      type: object
+      properties:
+        prompt: { type: string }
+        aspectRatio: { type: string }  # e.g. "3:2", "1:1"
+    outputSchema:
+      type: object
+      properties:
+        imageUrl: { type: string }
+
+  - name: pdf.generateLinerBooklet
+    description: >
+      Generate a printable PDF booklet for CD liner notes and back cover.
+    inputSchema:
+      type: object
+      properties:
+        artistProfile: { $ref: "#/entities/ArtistProfile" }
+        albumProfile:  { $ref: "#/entities/AlbumProfile" }
+        linerNotes:    { $ref: "#/entities/LinerNotes" }
+        coverArtDesign:{ $ref: "#/entities/CoverArtDesign" }
+        trackList:     { $ref: "#/entities/TrackList" }
+    outputSchema:
+      type: object
+      properties:
+        pdfUrl: { type: string }
+
+  - name: bundle.fetchFiles
+    description: >
+      Given an array of ContentFile definitions, fetch and assemble them
+      into a local directory ready for ISO creation.
+    inputSchema:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: "#/entities/ContentFile" }
+    outputSchema:
+      type: object
+      properties:
+        sourceDir: { type: string }
+
+  - name: iso.create
+    description: >
+      Create an ISO image from a source directory and volume label.
+    inputSchema:
+      type: object
+      properties:
+        sourceDir: { type: string }
+        volumeLabel: { type: string }
+    outputSchema:
+      type: object
+      properties:
+        isoPath: { type: string }
+
+  - name: cd.burn
+    description: >
+      Burn an ISO image to a physical CD/DVD drive.
+    inputSchema:
+      type: object
+      properties:
+        isoPath: { type: string }
+        driveId: { type: string }   # e.g. "/dev/cdrom" or "D:"
+    outputSchema:
+      type: object
+      properties:
+        status: { type: string }   # "SUCCESS" | "FAILED"
+        log:    { type: string }
+
+# ---------------------------------------------------------------------------
+# Agents: each with a clear responsibility
+# ---------------------------------------------------------------------------
+agents:
+  - name: MediaIngestionAgent
+    description: >
+      Convert uploaded AI-generated media files into a structured TrackList with
+      durations and consistent titles.
+    input:
+      type: object
+      properties:
+        uploadedTracks:
+          type: array
+          items: { $ref: "#/entities/TrackUpload" }
+    output:
+      $ref: "#/entities/TrackList"
+    tools:
+      - media.inspect
+
+  - name: ArtistPersonaAgent
+    description: >
+      Generate an AI artist persona and visual identity from the artist name
+      and overall album description.
+    input:
+      type: object
+      properties:
+        artistName: { type: string }
+        albumDescription: { type: string }
+    output:
+      $ref: "#/entities/ArtistProfile"
+
+  - name: AlbumIdentityAgent
+    description: >
+      Define the album concept, themes, and visual direction from the album
+      name, description, and artist persona.
+    input:
+      type: object
+      properties:
+        albumName: { type: string }
+        albumDescription: { type: string }
+        artistProfile: { $ref: "#/entities/ArtistProfile" }
+    output:
+      $ref: "#/entities/AlbumProfile"
+
+  - name: LinerNotesAgent
+    description: >
+      Write liner notes, including intro, artist and album story, track notes,
+      thank-yous, and credits.
+    input:
+      type: object
+      properties:
+        artistProfile: { $ref: "#/entities/ArtistProfile" }
+        albumProfile:  { $ref: "#/entities/AlbumProfile" }
+        trackList:     { $ref: "#/entities/TrackList" }
+    output:
+      $ref: "#/entities/LinerNotes"
+
+  - name: CoverArtAgent
+    description: >
+      Generate text prompts for front/back cover and artist portraits, and
+      optionally call an image tool to get concrete images.
+    input:
+      type: object
+      properties:
+        artistProfile: { $ref: "#/entities/ArtistProfile" }
+        albumProfile:  { $ref: "#/entities/AlbumProfile" }
+    output:
+      $ref: "#/entities/CoverArtDesign"
+    tools:
+      - art.generateImage
+
+  - name: PromoStoryboardAgent
+    description: >
+      Create a short (e.g., 20-second) promo video storyboard referencing the
+      album and tracks, but not generating the video itself.
+    input:
+      type: object
+      properties:
+        artistProfile: { $ref: "#/entities/ArtistProfile" }
+        albumProfile:  { $ref: "#/entities/AlbumProfile" }
+        trackList:     { $ref: "#/entities/TrackList" }
+    output:
+      $ref: "#/entities/PromoStoryboard"
+
+  - name: PackagingAgent
+    description: >
+      Assemble a ContentBundle that defines the CD filesystem layout, combining
+      audio/video tracks, cover art, liner PDF, promo storyboard, and metadata.
+    input:
+      type: object
+      properties:
+        artistProfile:   { $ref: "#/entities/ArtistProfile" }
+        albumProfile:    { $ref: "#/entities/AlbumProfile" }
+        trackList:       { $ref: "#/entities/TrackList" }
+        linerNotes:      { $ref: "#/entities/LinerNotes" }
+        coverArtDesign:  { $ref: "#/entities/CoverArtDesign" }
+        promoStoryboard: { $ref: "#/entities/PromoStoryboard" }
+    output:
+      $ref: "#/entities/ContentBundle"
+    tools:
+      - pdf.generateLinerBooklet
+
+  - name: CDWriterAgent
+    description: >
+      Create an ISO image from the ContentBundle and optionally burn it to a
+      physical CD using OS-specific tools.
+    input:
+      $ref: "#/entities/ContentBundle"
+    output:
+      $ref: "#/entities/BurnResult"
+    tools:
+      - bundle.fetchFiles
+      - iso.create
+      - cd.burn
+
+# ---------------------------------------------------------------------------
+# Flows: how everything ties together
+# ---------------------------------------------------------------------------
+flows:
+  - name: GenerateCDPackage
+    description: >
+      Generate all AI assets (persona, album identity, liner notes, cover art,
+      promo storyboard) and produce a ContentBundle, but do not burn the CD.
+    steps:
+      - agent: MediaIngestionAgent
+        inputMapping:
+          uploadedTracks: "uploadedTracks"
+        outputAlias: trackList
+
+      - agent: ArtistPersonaAgent
+        inputMapping:
+          artistName: "artistName"
+          albumDescription: "albumDescription"
+        outputAlias: artistProfile
+
+      - agent: AlbumIdentityAgent
+        inputMapping:
+          albumName: "albumName"
+          albumDescription: "albumDescription"
+          artistProfile: "artistProfile"
+        outputAlias: albumProfile
+
+      - agent: LinerNotesAgent
+        inputMapping:
+          artistProfile: "artistProfile"
+          albumProfile: "albumProfile"
+          trackList: "trackList"
+        outputAlias: linerNotes
+
+      - agent: CoverArtAgent
+        inputMapping:
+          artistProfile: "artistProfile"
+          albumProfile: "albumProfile"
+        outputAlias: coverArtDesign
+
+      - agent: PromoStoryboardAgent
+        inputMapping:
+          artistProfile: "artistProfile"
+          albumProfile: "albumProfile"
+          trackList: "trackList"
+        outputAlias: promoStoryboard
+
+      - agent: PackagingAgent
+        inputMapping:
+          artistProfile:   "artistProfile"
+          albumProfile:    "albumProfile"
+          trackList:       "trackList"
+          linerNotes:      "linerNotes"
+          coverArtDesign:  "coverArtDesign"
+          promoStoryboard: "promoStoryboard"
+        outputAlias: contentBundle
+
+  - name: GenerateAndBurnCD
+    description: >
+      Full pipeline: ingest Sora tracks, generate all AI assets, build the
+      content bundle, create an ISO, and burn to CD.
+    steps:
+      - useFlow: GenerateCDPackage
+        outputAlias: packageOutputs
+
+      - agent: CDWriterAgent
+        inputMapping:
+          # contentBundle from the previous flow alias
+          bundleId: "packageOutputs.contentBundle.bundleId"
+          files: "packageOutputs.contentBundle.files"
+          volumeLabel: "packageOutputs.contentBundle.volumeLabel"
+        outputAlias: burnResult
+
+# ---------------------------------------------------------------------------
+# Web App Requirements: React Frontend + Minimal Backend for CDForge
+# ---------------------------------------------------------------------------
+webApp:
+  name: Aurora
+  framework: React
+  language: TypeScript
+  styling: TailwindCSS
+  description: >
+    A single-page React application where users upload Sora-generated tracks,
+    enter artist/album details, select whether to burn a CD, and trigger the
+    GenerateCDPackage or GenerateAndBurnCD flows. The app shows progress,
+    errors, and final asset download links.
+
+  pages:
+    - name: MainPage
+      route: "/"
+      purpose: >
+        Allow the user to configure an AI album, upload Sora tracks, and
+        generate the full CD package (and optionally burn a CD).
+      layout:
+        sections:
+          - id: hero
+            elements:
+              - type: heading
+                text: "Aurora"
+              - type: subheading
+                text: "Turn Sora-generated tracks into a complete AI artist CD package."
+          - id: artistAlbumForm
+            title: "Artist & Album Details"
+            elements:
+              - type: textInput
+                id: artistName
+                label: "Artist Name"
+                required: true
+                bindToInput: artistName
+              - type: textInput
+                id: albumName
+                label: "Album Name"
+                required: true
+                bindToInput: albumName
+              - type: textarea
+                id: albumDescription
+                label: "Album Description / Vibe"
+                placeholder: "e.g. Nostalgic synthwave about driving in LA in 1995"
+                required: true
+                bindToInput: albumDescription
+          - id: trackUploadSection
+            title: "AI-Generated Tracks"
+            elements:
+              - type: fileUpload
+                id: uploadedTracks
+                label: "Upload AI-Generated Songs / Videos"
+                accept: ["audio/*", "video/*"]
+                multiple: true
+                required: true
+                bindToInput: uploadedTracks
+              - type: helpText
+                text: "Each uploaded file will be turned into a track with consistent titles and durations."
+          - id: optionsSection
+            title: "Options"
+            elements:
+              - type: toggle
+                id: burnCD
+                label: "Also create ISO and burn CD (if drive available)"
+                defaultValue: false
+              - type: select
+                id: driveId
+                label: "CD/DVD Drive Identifier"
+                optional: true
+                visibleWhen: "burnCD == true"
+                options:
+                  - "/dev/cdrom"
+                  - "D:"
+                  - "E:"
+          - id: actionsSection
+            title: "Actions"
+            elements:
+              - type: button
+                id: generatePackageButton
+                label: "Generate CD Package"
+                style: primary
+                onClick:
+                  callApi: "POST /api/cdforge/start"
+          - id: statusSection
+            title: "Status & Results"
+            elements:
+              - type: progressIndicator
+                id: jobStatus
+                pollingApi: "GET /api/cdforge/status?jobId={jobId}"
+              - type: errorBanner
+                id: jobError
+              - type: resultSummary
+                id: resultView
+                fields:
+                  - label: "Artist Persona"
+                    source: "artistProfile.personaSummary"
+                  - label: "Album Concept"
+                    source: "albumProfile.albumConcept"
+                  - label: "Tracks"
+                    source: "trackList.tracks"
+                  - label: "Liner Notes PDF"
+                    source: "packaging.pdfUrl"
+                    type: "link"
+                  - label: "Front Cover Art"
+                    source: "coverArtDesign.frontCoverUrl"
+                    type: "image"
+                  - label: "Back Cover Art"
+                    source: "coverArtDesign.backCoverUrl"
+                    type: "image"
+                  - label: "ISO Path"
+                    source: "burnResult.isoPath"
+                  - label: "Burn Status"
+                    source: "burnResult.burnStatus"
+
+# ---------------------------------------------------------------------------
+# Backend / API Requirements: Bridge React UI to Kiro Flows
+# ---------------------------------------------------------------------------
+backend:
+  language: TypeScript
+  framework: NodeExpress
+  description: >
+    Provide REST endpoints for the React app to upload files, start the
+    GenerateCDPackage or GenerateAndBurnCD flows, and poll for status/results.
+
+  storage:
+    media:
+      description: "Persist uploaded Sora files to a local or cloud storage path."
+      exampleLocalPath: "./uploads"
+    temp:
+      description: "Temp / working directories used by bundle.fetchFiles and iso.create."
+
+  endpoints:
+    - method: POST
+      path: /api/aurora/start
+      description: >
+        Start an Aurora job. Accept form-data with artist/album fields and one
+        or more AI-generated track files. Decide whether to call GenerateCDPackage or
+        GenerateAndBurnCD based on burnCD flag.
+      request:
+        contentType: multipart/form-data
+        body:
+          fields:
+            artistName: string
+            albumName: string
+            albumDescription: string
+            burnCD: boolean
+            driveId: string?    # optional; only used if burnCD is true
+          files:
+            uploadedTracks:      # multiple files allowed
+              type: file[]
+              description: "AI-generated audio/video files."
+      behavior:
+        - "Save each uploaded file to storage and map to entities.TrackUpload (id, filePath, originalFileName)."
+        - "If burnCD == false, invoke the GenerateCDPackage flow with inputs:
+           artistName, albumName, albumDescription, uploadedTracks."
+        - "If burnCD == true, invoke the GenerateAndBurnCD flow with the same inputs
+           plus driveId where needed by CDWriterAgent."
+        - "Return a jobId immediately so the UI can poll for status."
+      response:
+        status: 202
+        body:
+          jobId: string
+
+    - method: GET
+      path: /api/aurora/status
+      description: "Return status and partial or final results for a given jobId."
+      query:
+        jobId: string
+      response:
+        status: 200
+        body:
+          jobId: string
+          state: string        # 'PENDING' | 'RUNNING' | 'FAILED' | 'SUCCEEDED'
+          progressMessage: string?
+          error: string?
+          outputs:
+            artistProfile: { $ref: "#/entities/ArtistProfile" }?
+            albumProfile:  { $ref: "#/entities/AlbumProfile" }?
+            trackList:     { $ref: "#/entities/TrackList" }?
+            linerNotes:    { $ref: "#/entities/LinerNotes" }?
+            coverArtDesign:{ $ref: "#/entities/CoverArtDesign" }?
+            promoStoryboard:{ $ref: "#/entities/PromoStoryboard" }?
+            contentBundle: { $ref: "#/entities/ContentBundle" }?
+            burnResult:    { $ref: "#/entities/BurnResult" }?
+
+  kiroIntegration:
+    description: >
+      The backend must use the Kiro SDK / MCP client to invoke the defined flows.
+    flows:
+      - name: GenerateCDPackage
+        triggerFrom: "/api/cdforge/start when burnCD == false"
+      - name: GenerateAndBurnCD
+        triggerFrom: "/api/cdforge/start when burnCD == true"
+
+# ---------------------------------------------------------------------------
+# Acceptance Criteria
+# ---------------------------------------------------------------------------
+acceptanceCriteria:
+  - "User can open the React app at '/', fill in artistName, albumName, albumDescription,
+     upload at least one AI-generated track, and click 'Generate CD Package'."
+  - "The app calls POST /api/cdforge/start, receives a jobId, and shows a progress indicator
+     based on GET /api/cdforge/status."
+  - "On successful completion without burnCD, the UI displays:
+     - artist persona summary
+     - album concept
+     - list of tracks with titles
+     - links to liner notes PDF and cover art images."
+  - "When burnCD is enabled and a driveId is provided, the backend uses the
+     GenerateAndBurnCD flow and returns a BurnResult with isoPath and burnStatus
+     visible in the UI."
+  - "All required form fields are validated client-side and server-side, with
+     clear error messages for missing inputs or failed jobs."
