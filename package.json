@@ -1,0 +1,29 @@
+{
+  "name": "aurora",
+  "version": "1.0.0",
+  "description": "AI-powered CD package generator for Sora tracks",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspaces",
+    "build:production": "npm run clean && npm run build && npm run copy:assets",
+    "clean": "rimraf dist",
+    "copy:assets": "node scripts/build.mjs",
+    "install:all": "npm install && npm install --workspaces",
+    "start:production": "cd dist && node backend/server.js"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "rimraf": "^5.0.10"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

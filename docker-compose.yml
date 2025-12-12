@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  aurora:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # Add your environment variables here
+      # - PINATA_JWT=your_jwt_token
+    volumes:
+      # Persist uploads and ISO files
+      - ./data/uploads:/app/backend/uploads
+      - ./data/iso_output:/app/backend/iso_output
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
