@@ -16,7 +16,9 @@
     "clean": "rimraf dist",
     "copy:assets": "node scripts/build.mjs",
     "install:all": "npm install && npm install --workspaces",
-    "start:production": "cd dist && node backend/server.js"
+    "start:production": "cd dist && node backend/server.js",
+    "vercel-build": "npm run build:production",
+    "start": "node dist/start.js"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
